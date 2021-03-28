@@ -27,6 +27,11 @@ import os
 import argparse
 import requests
 import zipfile
+import glob
+import h5py
+from pylab import *
+import PIL
+import re
 
 # Increase download speed
 zipfile.ZipExtFile.MIN_READ_SIZE = 2 ** 20
@@ -531,16 +536,37 @@ class WebFile:
             "Range": f"bytes={self.offset}-{end_inclusive}",
         }
 
-        with self.session.get(self.url, headers=headers) as response:
-            data = response.content
+        with self.session.get(self.url, headers=headers, timeout=5.0) as response:
+            if response.ok:
+                data = response.content
+            else:
+                raise ValueError("failed resource")
 
         self.offset += len(data)
 
         return data
 
 
+def check_valid(path):
+    if path.endswith('jpg'):
+        try:
+            image = PIL.Image.open(path)
+            return True
+        except:
+            return False
+    elif path.endswith('hdf5'):
+        try:
+            with h5py.File(path, "r") as f:
+                data = f["dataset"]
+                return True
+        except:
+            return False
+
+
 def download_files(args):
     session = requests.session()
+
+    words_to_check = [word for words in args.contains for word in words]
 
     # For each zip file
     for url in URLS:
@@ -550,31 +576,149 @@ def download_files(args):
 
         # for each file in zip file
         for entry in z.infolist():
+            try:
+                # skip directories in zip file (will be created automatically)
+                if entry.is_dir():
+                    continue
 
-            # skip directories in zip file (will be created automatically)
-            if entry.is_dir():
-                continue
+                path = os.path.join(args.directory, entry.filename)
 
-            path = os.path.join(args.directory, entry.filename)
+                for word in words_to_check:
+                    if word in entry.filename:
+                        contains_any_word = True
+                        break
+                    else:
+                        contains_any_word = False
 
-            contains_all_words = all(
-                word in entry.filename for words in args.contains for word in words
-            )
+                if args.list:
+                    print(entry.filename)
+                    continue
 
-            if args.list:
-                print(entry.filename)
-                continue
+                if contains_any_word:
+                    if path.endswith(".color.hdf5") or path.endswith(".render_entity_id.hdf5"):
+                        # check if we have valid tonemapped image already
+                        if path.endswith(".color.hdf5"):
+                            tonemap_path = path.replace(".color.hdf5",".tonemap.jpg")
+                        else:
+                            tonemap_path = path.replace("_geometry_", "_final_").replace(".render_entity_id.hdf5", ".tonemap.jpg")
 
-            if contains_all_words:
-                if os.path.isfile(path) and not args.overwrite:
-                    print("File already exists:", path)
-                else:
+                        if check_valid(tonemap_path):
+                            continue
+                    elif os.path.isfile(path) and not args.overwrite and check_valid(path):
+                        if not args.silent:
+                            print("File already exists:", path)
+                        continue
+
                     print("Downloading:", path)
 
                     z.extract(entry.filename, args.directory)
-            else:
-                if not args.silent:
-                    print("Skipping:", path)
+                else:
+                    if not args.silent:
+                        print("Skipping:", path)
+            except:
+                print("ERROR: ", path)
+                continue
+
+        scene_name = url[-14:-4]
+        images_dir = os.path.join(*[args.directory, scene_name, "images"])
+        print(images_dir)
+        geometry_dirs = glob.glob(images_dir + "/*geometry_hdf5")
+        for geometry_dir in geometry_dirs:
+            camera_name = re.search('.*scene_(.*)_geometry_hdf5', geometry_dir, re.IGNORECASE).group(1)
+            in_scene_fileroot = "scene"
+
+            in_rgb_hdf5_dir = os.path.join(images_dir, in_scene_fileroot + "_" + camera_name + "_final_hdf5")
+            in_rgb_hdf5_files = os.path.join(images_dir, in_scene_fileroot + "_" + camera_name + "_final_hdf5",
+                                             "frame.*.color.hdf5")
+            in_render_entity_id_hdf5_dir = os.path.join(images_dir,
+                                                        in_scene_fileroot + "_" + camera_name + "_geometry_hdf5")
+            out_preview_dir = os.path.join(images_dir, in_scene_fileroot + "_" + camera_name + "_final_hdf5")
+
+            if not os.path.exists(out_preview_dir): os.makedirs(out_preview_dir)
+
+            in_filenames = [os.path.basename(f) for f in sort(glob.glob(in_rgb_hdf5_files))]
+
+            for in_filename in in_filenames:
+                in_file_root = in_filename.replace(".color.hdf5", "")
+
+                in_rgb_hdf5_file = os.path.join(in_rgb_hdf5_dir, in_filename)
+                in_render_entity_id_hdf5_file = os.path.join(in_render_entity_id_hdf5_dir,
+                                                             in_file_root + ".render_entity_id.hdf5")
+                out_rgb_tm_jpg_file = os.path.join(out_preview_dir, in_file_root + ".tonemap.jpg")
+
+                try:
+                    with h5py.File(in_rgb_hdf5_file, "r") as f:
+                        rgb_color = f["dataset"][:].astype(float32)
+                except:
+                    print("[HYPERSIM: SCENE_GENERATE_IMAGES_TONEMAP]")
+                    print("[HYPERSIM: SCENE_GENERATE_IMAGES_TONEMAP]")
+                    print("[HYPERSIM: SCENE_GENERATE_IMAGES_TONEMAP]")
+                    print(
+                        "[HYPERSIM: SCENE_GENERATE_IMAGES_TONEMAP] WARNING: COULD NOT LOAD COLOR IMAGE: " + in_rgb_hdf5_file + "...")
+                    print("[HYPERSIM: SCENE_GENERATE_IMAGES_TONEMAP]")
+                    print("[HYPERSIM: SCENE_GENERATE_IMAGES_TONEMAP]")
+                    print("[HYPERSIM: SCENE_GENERATE_IMAGES_TONEMAP]")
+                    continue
+
+                try:
+                    with h5py.File(in_render_entity_id_hdf5_file, "r") as f:
+                        render_entity_id = f["dataset"][:].astype(int32)
+                except:
+                    print("[HYPERSIM: SCENE_GENERATE_IMAGES_TONEMAP]")
+                    print("[HYPERSIM: SCENE_GENERATE_IMAGES_TONEMAP]")
+                    print("[HYPERSIM: SCENE_GENERATE_IMAGES_TONEMAP]")
+                    print(
+                        "[HYPERSIM: SCENE_GENERATE_IMAGES_TONEMAP] WARNING: COULD NOT LOAD RENDER ENTITY ID IMAGE: " + in_render_entity_id_hdf5_file + "...")
+                    print("[HYPERSIM: SCENE_GENERATE_IMAGES_TONEMAP]")
+                    print("[HYPERSIM: SCENE_GENERATE_IMAGES_TONEMAP]")
+                    print("[HYPERSIM: SCENE_GENERATE_IMAGES_TONEMAP]")
+                    continue
+
+                #
+                # compute brightness according to "CCIR601 YIQ" method, use CGIntrinsics strategy for tonemapping, see [1,2]
+                # [1] https://github.com/snavely/pbrs_tonemapper/blob/master/tonemap_rgbe.py
+                # [2] https://landofinterruptions.co.uk/manyshades
+                #
+
+                assert all(render_entity_id != 0)
+
+                gamma = 1.0 / 2.2  # standard gamma correction exponent
+                inv_gamma = 1.0 / gamma
+                percentile = 90  # we want this percentile brightness value in the unmodified image...
+                brightness_nth_percentile_desired = 0.8  # ...to be this bright after scaling
+
+                valid_mask = render_entity_id != -1
+
+                if count_nonzero(valid_mask) == 0:
+                    scale = 1.0  # if there are no valid pixels, then set scale to 1.0
+                else:
+                    brightness = 0.3 * rgb_color[:, :, 0] + 0.59 * rgb_color[:, :, 1] + 0.11 * rgb_color[:, :,
+                                                                                               2]  # "CCIR601 YIQ" method for computing brightness
+                    brightness_valid = brightness[valid_mask]
+
+                    eps = 0.0001  # if the kth percentile brightness value in the unmodified image is less than this, set the scale to 0.0 to avoid divide-by-zero
+                    brightness_nth_percentile_current = np.percentile(brightness_valid, percentile)
+
+                    if brightness_nth_percentile_current < eps:
+                        scale = 0.0
+                    else:
+
+                        # Snavely uses the following expression in the code at https://github.com/snavely/pbrs_tonemapper/blob/master/tonemap_rgbe.py:
+                        # scale = np.exp(np.log(brightness_nth_percentile_desired)*inv_gamma - np.log(brightness_nth_percentile_current))
+                        #
+                        # Our expression below is equivalent, but is more intuitive, because it follows more directly from the expression:
+                        # (scale*brightness_nth_percentile_current)^gamma = brightness_nth_percentile_desired
+
+                        scale = np.power(brightness_nth_percentile_desired, inv_gamma) / brightness_nth_percentile_current
+
+                rgb_color_tm = np.power(np.maximum(scale * rgb_color, 0), gamma)
+
+                print("[HYPERSIM: SCENE_GENERATE_IMAGES_TONEMAP] Saving output file: " + out_rgb_tm_jpg_file + " (scale=" + str(
+                    scale) + ")")
+
+                imsave(out_rgb_tm_jpg_file, clip(rgb_color_tm, 0, 1))
+                os.remove(in_rgb_hdf5_file)
+                os.remove(in_render_entity_id_hdf5_file)
 
 
 def main():
@@ -614,3 +758,5 @@ example: print this help text
 
 if __name__ == "__main__":
     main()
+
+# python contrib/99991/download.py -d evermotion_dataset/scenes --contains .color.hdf5 --contains .semantic.hdf5 --contains .render_entity_id.hdf5
